@@ -1,0 +1,286 @@
+\documentclass[11pt]{article}
+\usepackage[UTF8]{ctex}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs,longtable}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+
+\definecolor{codegray}{gray}{0.95}
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codegray},
+  breaklines=true,
+  columns=fullflexible
+}
+
+\title{子任务2b：ETF-期货配对交易策略（基于OU过程）\\Codex实现任务文档}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{任务目标}
+请基于已合并的高频数据，实现 \textbf{ETF-期货配对交易策略}，并使用 \textbf{OU（Ornstein-Uhlenbeck）均值回复过程}建模价差。
+
+本任务仅针对：
+\begin{itemize}
+  \item ETF：\texttt{511090}
+  \item 期货：\texttt{TL\_main\_snapshot.csv}（30年期国债期货主连快照）
+\end{itemize}
+
+回测区间：\textbf{2025-07-01 到 2025-12-31}。
+
+最终交付内容：
+\begin{itemize}
+  \item OU 参数估计结果（$\theta,\mu,\sigma$）
+  \item 动态参数更新机制（每180分钟更新）
+  \item Backtrader完整策略实现与回测
+  \item 绩效指标与图表输出
+\end{itemize}
+
+\section{数据源与约束（必须遵守）}
+\subsection{只允许使用以下文件}
+ETF文件（仅此一个）：
+\begin{lstlisting}
+merged_outputs/511090_20250701_20251231_merged.csv
+\end{lstlisting}
+
+期货文件（仅此一个）：
+\begin{lstlisting}
+国债期货合约数据/快照/30年TL合约/TL_main_snapshot.csv
+\end{lstlisting}
+
+\textbf{不要读取其他 merged 文件。}
+
+\subsection{已知 merged\_outputs 文件名（防止误读）}
+当前 \texttt{merged\_outputs} 下文件名为：
+\begin{lstlisting}
+019742_20260105_20260312_merged
+019776_20260105_20260312_merged
+511090_20250701_20251231_merged
+019789_20260105_20260312_merged
+511130_20260105_20260227_merged
+\end{lstlisting}
+
+本子任务只用 \texttt{511090\_20250701\_20251231\_merged}。
+
+\section{实现产物要求}
+请新建并实现以下文件（建议）：
+\begin{itemize}
+  \item \texttt{06\_etf\_futures\_ou\_pair\_trading.ipynb}（主Notebook，面向展示与运行）
+  \item \texttt{outputs/results/performance\_metrics.csv}
+  \item \texttt{outputs/results/ou\_params\_history.csv}
+  \item \texttt{outputs/results/trade\_log.csv}
+  \item \texttt{outputs/figures/spread\_zscore.png}
+  \item \texttt{outputs/figures/positions.png}
+  \item \texttt{outputs/figures/equity\_curve.png}
+  \item \texttt{outputs/logs/trading\_log.txt}
+\end{itemize}
+
+\section{数据处理规范}
+\subsection{ETF数据处理}
+读取：
+\begin{lstlisting}
+merged_outputs/511090_20250701_20251231_merged.csv
+\end{lstlisting}
+
+保留核心字段（若存在同义字段，需统一命名）：
+\begin{itemize}
+  \item 时间：\texttt{trade\_time} $\rightarrow$ \texttt{datetime}
+  \item ETF价格：优先 \texttt{close}，其次 \texttt{last}，统一为 \texttt{etf\_price}
+  \item 成交量：\texttt{volume}（用于诊断）
+\end{itemize}
+
+\subsection{期货数据处理}
+读取：
+\begin{lstlisting}
+国债期货合约数据/快照/30年TL合约/TL_main_snapshot.csv
+\end{lstlisting}
+
+\textbf{大文件优化要求}：仅读取必要列（避免全列读取）。建议：
+\begin{lstlisting}
+usecols=["trade_time", "last", "code"]
+\end{lstlisting}
+
+并执行：
+\begin{itemize}
+  \item \texttt{trade\_time} 转 \texttt{datetime}
+  \item \texttt{last} 重命名为 \texttt{futures\_price}
+  \item 排序、去重
+  \item 截取回测区间
+\end{itemize}
+
+\subsection{时间对齐与重采样}
+统一频率到1分钟（建议）：
+\begin{itemize}
+  \item ETF和期货分别以 \texttt{datetime} 为索引，\texttt{resample('1min').last().ffill()}
+  \item 仅保留区间：\texttt{2025-07-01 00:00:00} 至 \texttt{2025-12-31 23:59:59}
+\end{itemize}
+
+合并后至少包含：
+\begin{lstlisting}
+datetime, etf_price, futures_price, spread
+\end{lstlisting}
+
+\section{价差定义与OU建模}
+\subsection{价差定义}
+若数据中已有 \texttt{ETF\_Futures\_Spread} 列可直接使用；否则定义：
+\[
+\text{spread}_t = ETF_t - \beta \cdot Futures_t,\quad \beta=1
+\]
+
+\subsection{OU过程}
+连续形式：
+\[
+dX_t = \theta(\mu - X_t)dt + \sigma dW_t
+\]
+
+离散拟合：
+\[
+X_{t+1}=\alpha + \beta X_t + \varepsilon_t
+\]
+
+参数恢复：
+\[
+\theta = -\frac{\ln(\beta)}{\Delta t},\quad
+\mu = \frac{\alpha}{1-\beta},\quad
+\sigma=\text{std}(\varepsilon)
+\]
+
+其中 $\Delta t$ 取分钟级（如1）。
+
+\subsection{训练集}
+初次估计使用前50\%样本：
+\begin{lstlisting}
+train_size = int(len(df) * 0.5)
+\end{lstlisting}
+
+\section{动态参数更新机制}
+必须支持动态更新：
+\begin{itemize}
+  \item 每 \textbf{180分钟} 重新估计一次 OU 参数
+  \item 使用滚动窗口（建议窗口=180 bars，可参数化）
+  \item 更新记录需写入 \texttt{ou\_params\_history.csv}
+\end{itemize}
+
+\section{交易信号规则}
+\subsection{z-score}
+\[
+z_t = \frac{spread_t - \mu_t}{\sigma_t}
+\]
+
+\subsection{默认阈值}
+\[
+entry\_z = 2.0,\quad exit\_z = 0.5
+\]
+
+\subsection{开仓平仓逻辑}
+\begin{itemize}
+  \item 若 $z_t > entry\_z$：做空价差（卖ETF，买期货）
+  \item 若 $z_t < -entry\_z$：做多价差（买ETF，卖期货）
+  \item 若 $|z_t| < exit\_z$：平仓
+\end{itemize}
+
+\section{仓位与风控}
+\subsection{上限约束}
+\begin{itemize}
+  \item 最大资金上限：\texttt{10,000,000}
+  \item 最大期货仓位：\texttt{8手}
+\end{itemize}
+
+\subsection{动态仓位}
+仓位与 $|z_t|$ 成比例：
+\[
+ratio_t = \min\left(\frac{|z_t|}{4}, 1\right),\quad
+contracts_t = \lfloor ratio_t \times 8 \rfloor
+\]
+
+并保证不突破资金限制与合约上限。
+
+\section{Backtrader实现要求}
+实现类：
+\begin{lstlisting}
+class OUPairTradingStrategy(bt.Strategy)
+\end{lstlisting}
+
+至少包括：
+\begin{itemize}
+  \item OU参数初始化与滚动更新
+  \item z-score计算
+  \item 信号生成与执行
+  \item 双资产仓位管理（ETF + Futures）
+  \item 交易日志记录
+\end{itemize}
+
+Broker建议：
+\begin{lstlisting}
+initial_cash = 10_000_000
+commission = configurable
+slippage = configurable
+\end{lstlisting}
+
+\section{输出指标与结果文件}
+\subsection{绩效指标}
+至少输出：
+\begin{itemize}
+  \item Total Return
+  \item Annualized Return
+  \item Sharpe Ratio
+  \item Max Drawdown
+  \item Win Rate
+  \item Number of Trades
+\end{itemize}
+
+保存到：
+\begin{lstlisting}
+outputs/results/performance_metrics.csv
+\end{lstlisting}
+
+\subsection{交易日志}
+每笔至少记录：
+\begin{itemize}
+  \item timestamp
+  \item spread, z\_score
+  \item signal（long\_spread/short\_spread/close）
+  \item etf\_price, futures\_price
+  \item etf\_position, futures\_position
+  \item pnl, cumulative\_pnl
+\end{itemize}
+
+保存到：
+\begin{lstlisting}
+outputs/results/trade_log.csv
+\end{lstlisting}
+
+\section{可视化要求}
+至少生成并保存以下图片：
+\begin{itemize}
+  \item \texttt{spread\_zscore.png}：spread与z-score（含阈值线）
+  \item \texttt{positions.png}：ETF与Futures仓位变化
+  \item \texttt{equity\_curve.png}：策略净值曲线
+\end{itemize}
+
+\section{工程与鲁棒性要求}
+\begin{itemize}
+  \item 尽量向量化，避免大规模 \texttt{apply}
+  \item 大文件读取注意 \texttt{usecols}/分块处理
+  \item 每一步打印 shape、时间范围、缺失率、重复时间戳数
+  \item 关键异常用 \texttt{try/except} 包裹并输出可读错误信息（\textbf{但不要在import处使用try/except}）
+  \item 所有阈值、窗口、费用、仓位上限均参数化
+\end{itemize}
+
+\section{验收清单（给Codex）}
+实现完成后需满足：
+\begin{enumerate}
+  \item 仅使用指定的511090与TL主连文件
+  \item 回测区间严格为2025-07-01到2025-12-31
+  \item OU参数可估计且支持每180分钟滚动更新
+  \item Backtrader策略可运行且有交易记录
+  \item 自动输出绩效CSV、参数历史CSV、交易日志CSV
+  \item 自动输出三张核心图表
+\end{enumerate}
+
+\end{document}
